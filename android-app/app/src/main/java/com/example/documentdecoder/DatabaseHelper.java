@@ -104,8 +104,14 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                         : title.trim()
         );
 
-        values.put(COLUMN_DOCUMENT_TEXT, documentText);
-        values.put(COLUMN_RESULT_JSON, result.toString());
+        values.put(
+                COLUMN_DOCUMENT_TEXT,
+                documentText == null ? "" : documentText
+        );
+        values.put(
+                COLUMN_RESULT_JSON,
+                result == null ? "{}" : result.toString()
+        );
         values.put(COLUMN_CREATED_AT, createdAt);
 
         return db.insert(TABLE_ANALYSES, null, values);
@@ -167,16 +173,25 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         ContentValues values = new ContentValues();
 
         values.put(COLUMN_REMINDER_ID, reminderId);
-        values.put(COLUMN_EVENT, event);
+        values.put(
+                COLUMN_EVENT,
+                event == null || event.trim().isEmpty()
+                        ? "Document deadline"
+                        : event.trim()
+        );
         values.put(COLUMN_DEADLINE_MILLIS, deadlineMillis);
         values.put(COLUMN_REMINDER_MILLIS, reminderMillis);
-        values.put(COLUMN_TIMING_LABEL, timingLabel);
+        values.put(
+                COLUMN_TIMING_LABEL,
+                timingLabel == null ? "At deadline" : timingLabel
+        );
         values.put(COLUMN_STATUS, "Scheduled");
 
-        long result = getWritableDatabase().insert(
+        long result = getWritableDatabase().insertWithOnConflict(
                 TABLE_REMINDERS,
                 null,
-                values
+                values,
+                SQLiteDatabase.CONFLICT_REPLACE
         );
 
         return result != -1;

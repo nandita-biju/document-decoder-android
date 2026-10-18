@@ -100,6 +100,8 @@ def analyze():
             "error": "Please provide non-empty document text."
         }), 400
 
+    document_text = document_text.strip()
+
     if len(document_text) > MAX_DOCUMENT_LENGTH:
         return jsonify({
             "error": (
@@ -109,33 +111,56 @@ def analyze():
         }), 413
 
     try:
-        
         result = asyncio.run(run_agent(document_text))
 
+        # Handle Markdown fences if the model wraps JSON in ```json ... ```
+        cleaned_result = result.strip()
+        if cleaned_result.startswith("```"):
+            lines = cleaned_result.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            cleaned_result = "\n".join(lines).strip()
+
         # Parse the model response as JSON.
-        parsed_result = json.loads(result)
+        try:
+            parsed_result = json.loads(cleaned_result)
+        except json.JSONDecodeError as decode_err:
+            app.logger.error(
+                "Failed to parse JSON from AI model: %s. Raw output: %s",
+                decode_err,
+                result
+            )
+            raise ValueError("The AI model did not return valid JSON.")
 
         if not isinstance(parsed_result, dict):
             raise ValueError("The AI response must be a JSON object.")
 
-        required_keys = {
-            "summary",
+        # Ensure summary is present and non-empty
+        summary_val = parsed_result.get("summary")
+        if not isinstance(summary_val, str) or not summary_val.strip():
+            parsed_result["summary"] = "No summary available."
+        else:
+            parsed_result["summary"] = summary_val.strip()
+
+        # Ensure all required list categories exist as lists with sensible defaults
+        list_sections = [
             "tasks",
             "deadlines",
             "required_documents",
             "conditions",
             "important_details",
             "uncertainties",
-        }
-
-        if not required_keys.issubset(parsed_result.keys()):
-            raise ValueError("The AI response is missing required fields.")
+        ]
+        for key in list_sections:
+            if key not in parsed_result or not isinstance(parsed_result[key], list):
+                parsed_result[key] = []
 
         return jsonify({
             "status": "success",
             "result": parsed_result,
         })
-
 
     except Exception:
         app.logger.exception("Document analysis failed.")

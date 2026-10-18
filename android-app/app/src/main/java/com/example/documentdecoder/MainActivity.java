@@ -32,6 +32,7 @@ import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
@@ -48,8 +49,11 @@ import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.net.ConnectException;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -156,7 +160,7 @@ public class MainActivity extends AppCompatActivity {
 
         if (historyParent != null) {
             int historyIndex =
-                    historyParent.indexOfChild(historyButton);
+                historyParent.indexOfChild(historyButton);
 
             ViewGroup.LayoutParams params =
                     new ViewGroup.LayoutParams(
@@ -182,7 +186,22 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ---------------------------------------------------------
-    // NOTIFICATION SETUP
+    // UI CONTROL HELPERS
+    // ---------------------------------------------------------
+
+    private void setControlsEnabled(boolean enabled) {
+        analyzeButton.setEnabled(enabled);
+        uploadPdfButton.setEnabled(enabled);
+        historyButton.setEnabled(enabled);
+        testNotificationButton.setEnabled(enabled);
+
+        if (myRemindersButton != null) {
+            myRemindersButton.setEnabled(enabled);
+        }
+    }
+
+    // ---------------------------------------------------------
+    // NOTIFICATION SETUP & PERMISSION
     // ---------------------------------------------------------
 
     private void setupNotificationChannel() {
@@ -230,6 +249,31 @@ public class MainActivity extends AppCompatActivity {
                 this,
                 Manifest.permission.POST_NOTIFICATIONS
         ) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            @NonNull String[] permissions,
+            @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST) {
+            if (grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                Toast.makeText(
+                        this,
+                        "Notification permission granted.",
+                        Toast.LENGTH_SHORT
+                ).show();
+            } else {
+                Toast.makeText(
+                        this,
+                        "Notifications disabled. You will not receive deadline alerts.",
+                        Toast.LENGTH_LONG
+                ).show();
+            }
+        }
     }
 
     // ---------------------------------------------------------
@@ -331,7 +375,7 @@ public class MainActivity extends AppCompatActivity {
                 extractedDate == null || extractedDate.trim().isEmpty()
                         ? "No date was extracted."
                         : "Date extracted from your document: "
-                          + extractedDate;
+                        + extractedDate;
 
         Calendar selectedDate = Calendar.getInstance();
 
@@ -439,7 +483,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // Schedule the alarm and save its details in SQLite.
-
     private void scheduleDeadlineReminder(
             String event,
             long reminderTime,
@@ -591,7 +634,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        uploadPdfButton.setEnabled(false);
+        setControlsEnabled(false);
         loadingIndicator.setVisibility(View.VISIBLE);
         statusMessage.setVisibility(View.VISIBLE);
         statusMessage.setText("Extracting PDF text...");
@@ -601,10 +644,16 @@ public class MainActivity extends AppCompatActivity {
                          getContentResolver().openInputStream(uri)) {
 
                 if (input == null) {
-                    throw new Exception("Could not open this PDF.");
+                    throw new Exception("Could not open this PDF file.");
                 }
 
                 try (PDDocument document = PDDocument.load(input)) {
+                    if (document.isEncrypted()) {
+                        throw new Exception(
+                                "This PDF is password-protected and cannot be read."
+                        );
+                    }
+
                     String extractedText =
                             new PDFTextStripper()
                                     .getText(document)
@@ -613,7 +662,7 @@ public class MainActivity extends AppCompatActivity {
                     if (extractedText.isEmpty()) {
                         throw new Exception(
                                 "No selectable text found. "
-                                        + "This may be a scanned PDF."
+                                        + "This may be a scanned or image-based PDF."
                         );
                     }
 
@@ -634,7 +683,7 @@ public class MainActivity extends AppCompatActivity {
                                 "PDF loaded. Tap Analyze Document to continue."
                         );
 
-                        uploadPdfButton.setEnabled(true);
+                        setControlsEnabled(true);
                         loadingIndicator.setVisibility(View.GONE);
 
                         resultsContainer.removeAllViews();
@@ -651,15 +700,17 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception e) {
                 String message = e.getMessage();
 
-                if (message == null || message.trim().isEmpty()) {
-                    message = "Unable to read the selected PDF.";
+                if (message == null || message.trim().isEmpty()
+                        || message.contains("End of data reached")
+                        || message.contains("PDF header not found")) {
+                    message = "Unable to read the selected PDF. The file may be empty or corrupted.";
                 }
 
                 final String errorMessage = message;
 
                 runOnUiThread(() -> {
                     statusMessage.setText(errorMessage);
-                    uploadPdfButton.setEnabled(true);
+                    setControlsEnabled(true);
                     loadingIndicator.setVisibility(View.GONE);
                 });
             }
@@ -758,15 +809,7 @@ public class MainActivity extends AppCompatActivity {
         resultsContainer.setVisibility(View.GONE);
 
         loadingIndicator.setVisibility(View.VISIBLE);
-
-        analyzeButton.setEnabled(false);
-        uploadPdfButton.setEnabled(false);
-        historyButton.setEnabled(false);
-        testNotificationButton.setEnabled(false);
-
-        if (myRemindersButton != null) {
-            myRemindersButton.setEnabled(false);
-        }
+        setControlsEnabled(false);
 
         statusMessage.setVisibility(View.VISIBLE);
         statusMessage.setText("Analyzing your document. Please wait...");
@@ -827,29 +870,51 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
 
+                String responseBody = response.toString().trim();
+
                 if (code < 200 || code >= 300) {
                     String errorMessage = "Server error: " + code;
 
-                    try {
-                        JSONObject error =
-                                new JSONObject(response.toString());
+                    if (!responseBody.isEmpty()) {
+                        try {
+                            JSONObject error =
+                                    new JSONObject(responseBody);
 
-                        errorMessage = error.optString(
-                                "error",
-                                errorMessage
-                        );
-                    } catch (Exception ignored) {
-                        // Use the HTTP status if the response isn't JSON.
+                            errorMessage = error.optString(
+                                    "error",
+                                    errorMessage
+                            );
+                        } catch (Exception ignored) {
+                            // Non-JSON error body
+                        }
                     }
 
                     throw new Exception(errorMessage);
                 }
 
-                JSONObject responseJson =
-                        new JSONObject(response.toString());
+                if (responseBody.isEmpty()) {
+                    throw new Exception("Received an empty response from server.");
+                }
 
-                JSONObject result =
-                        responseJson.getJSONObject("result");
+                JSONObject responseJson;
+                try {
+                    responseJson = new JSONObject(responseBody);
+                } catch (Exception parseException) {
+                    throw new Exception("Malformed response from server: invalid JSON.");
+                }
+
+                if (!responseJson.has("result") || responseJson.isNull("result")) {
+                    String err = responseJson.optString(
+                            "error",
+                            "Invalid response from server: missing analysis result."
+                    );
+                    throw new Exception(err);
+                }
+
+                JSONObject result = responseJson.optJSONObject("result");
+                if (result == null) {
+                    throw new Exception("Analysis result is not a JSON object.");
+                }
 
                 boolean saved = false;
 
@@ -881,22 +946,23 @@ public class MainActivity extends AppCompatActivity {
                     );
 
                     loadingIndicator.setVisibility(View.GONE);
-
-                    analyzeButton.setEnabled(true);
-                    uploadPdfButton.setEnabled(true);
-                    historyButton.setEnabled(true);
-                    testNotificationButton.setEnabled(true);
-
-                    if (myRemindersButton != null) {
-                        myRemindersButton.setEnabled(true);
-                    }
+                    setControlsEnabled(true);
                 });
 
             } catch (Exception e) {
-                String message = e.getMessage();
+                String message;
 
-                if (message == null || message.trim().isEmpty()) {
-                    message = "An unexpected error occurred.";
+                if (e instanceof ConnectException) {
+                    message = "Unable to connect to the backend server. Please verify the backend is running at " + API_URL;
+                } else if (e instanceof SocketTimeoutException) {
+                    message = "Connection timed out. The backend server took too long to respond.";
+                } else if (e instanceof UnknownHostException) {
+                    message = "Cannot resolve server host. Check your network connection.";
+                } else {
+                    message = e.getMessage();
+                    if (message == null || message.trim().isEmpty()) {
+                        message = "An unexpected error occurred during document analysis.";
+                    }
                 }
 
                 final String errorMessage = message;
@@ -907,15 +973,7 @@ public class MainActivity extends AppCompatActivity {
                     );
 
                     loadingIndicator.setVisibility(View.GONE);
-
-                    analyzeButton.setEnabled(true);
-                    uploadPdfButton.setEnabled(true);
-                    historyButton.setEnabled(true);
-                    testNotificationButton.setEnabled(true);
-
-                    if (myRemindersButton != null) {
-                        myRemindersButton.setEnabled(true);
-                    }
+                    setControlsEnabled(true);
                 });
 
             } finally {
@@ -932,6 +990,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void showAnalysisHistory() {
         ArrayList<Long> analysisIds = new ArrayList<>();
+        ArrayList<String> historyTitles = new ArrayList<>();
         ArrayList<String> historyLabels = new ArrayList<>();
 
         Cursor cursor = null;
@@ -957,6 +1016,7 @@ public class MainActivity extends AppCompatActivity {
                 String date = cursor.getString(dateColumn);
 
                 analysisIds.add(id);
+                historyTitles.add(title);
                 historyLabels.add(title + "\n" + date);
             }
 
@@ -993,13 +1053,79 @@ public class MainActivity extends AppCompatActivity {
                 historyLabels
         );
 
-        new AlertDialog.Builder(this)
+        AlertDialog historyDialog = new AlertDialog.Builder(this)
                 .setTitle("Your Analysis History")
                 .setAdapter(adapter, (dialog, which) -> {
                     long selectedId = analysisIds.get(which);
-                    openSavedAnalysis(selectedId);
+                    String selectedTitle = historyTitles.get(which);
+                    showHistoryItemOptions(selectedId, selectedTitle);
                 })
                 .setNegativeButton("Close", null)
+                .create();
+
+        historyDialog.setOnShowListener(d -> {
+            if (historyDialog.getListView() != null) {
+                historyDialog.getListView().setOnItemLongClickListener(
+                        (parent, view, position, id) -> {
+                            historyDialog.dismiss();
+                            long selectedId = analysisIds.get(position);
+                            String selectedTitle = historyTitles.get(position);
+                            confirmDeleteAnalysis(selectedId, selectedTitle);
+                            return true;
+                        }
+                );
+            }
+        });
+
+        historyDialog.show();
+    }
+
+    private void showHistoryItemOptions(long selectedId, String title) {
+        String[] options = {
+                "Open Analysis",
+                "Delete Analysis"
+        };
+
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setItems(options, (dialog, which) -> {
+                    if (which == 0) {
+                        openSavedAnalysis(selectedId);
+                    } else if (which == 1) {
+                        confirmDeleteAnalysis(selectedId, title);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void confirmDeleteAnalysis(long selectedId, String title) {
+        new AlertDialog.Builder(this)
+                .setTitle("Delete Analysis")
+                .setMessage(
+                        "Are you sure you want to delete this saved analysis?\n\n\""
+                                + title + "\""
+                )
+                .setPositiveButton("Delete", (dialog, which) -> {
+                    int deleted = databaseHelper.deleteAnalysis(selectedId);
+
+                    if (deleted > 0) {
+                        Toast.makeText(
+                                MainActivity.this,
+                                "Analysis deleted.",
+                                Toast.LENGTH_SHORT
+                        ).show();
+                    } else {
+                        Toast.makeText(
+                                MainActivity.this,
+                                "Analysis could not be deleted.",
+                                Toast.LENGTH_SHORT
+                        ).show();
+                    }
+
+                    showAnalysisHistory();
+                })
+                .setNegativeButton("Cancel", null)
                 .show();
     }
 
@@ -1036,10 +1162,10 @@ public class MainActivity extends AppCompatActivity {
 
             JSONObject result = new JSONObject(resultJson);
 
-            documentTitleInput.setText(title);
-            documentTextInput.setText(documentText);
+            documentTitleInput.setText(title == null ? "" : title);
+            documentTextInput.setText(documentText == null ? "" : documentText);
 
-            displayResults(title, result);
+            displayResults(title == null ? "" : title, result);
 
             statusMessage.setVisibility(View.VISIBLE);
             statusMessage.setText(
@@ -1082,20 +1208,25 @@ public class MainActivity extends AppCompatActivity {
                 true
         );
 
-        if (!title.isEmpty()) {
+        if (title != null && !title.trim().isEmpty()) {
             addText(
                     resultsContainer,
-                    title,
+                    title.trim(),
                     22,
                     Color.rgb(32, 36, 58),
                     true
             );
         }
 
+        String summary = result.optString("summary", "").trim();
+        if (summary.isEmpty()) {
+            summary = "No summary available.";
+        }
+
         addCard(
                 "Summary",
                 "A quick overview of the document",
-                result.optString("summary", "No summary available."),
+                summary,
                 "#5265D8"
         );
 
@@ -1316,7 +1447,24 @@ public class MainActivity extends AppCompatActivity {
         addText(section, heading, 18,
                 Color.rgb(32, 36, 58), true);
 
-        if (items == null || items.length() == 0) {
+        int validCount = 0;
+        if (items != null) {
+            for (int i = 0; i < items.length(); i++) {
+                String entry = items.optString(i, "").trim();
+                if (!entry.isEmpty()) {
+                    validCount++;
+                    addText(
+                            section,
+                            "\u2022  " + entry,
+                            14,
+                            Color.rgb(55, 59, 75),
+                            false
+                    );
+                }
+            }
+        }
+
+        if (validCount == 0) {
             addText(
                     section,
                     "None identified.",
@@ -1324,16 +1472,6 @@ public class MainActivity extends AppCompatActivity {
                     Color.rgb(104, 109, 128),
                     false
             );
-        } else {
-            for (int i = 0; i < items.length(); i++) {
-                addText(
-                        section,
-                        "\u2022  " + items.optString(i),
-                        14,
-                        Color.rgb(55, 59, 75),
-                        false
-                );
-            }
         }
 
         resultsContainer.addView(section);
@@ -1503,6 +1641,9 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        if (databaseHelper != null) {
+            databaseHelper.close();
+        }
         super.onDestroy();
         executor.shutdownNow();
     }
